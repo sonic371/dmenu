@@ -47,6 +47,9 @@ static struct item *items = NULL;
 static struct item *matches, *matchend;
 static struct item *prev, *curr, *next, *sel;
 static int mon = -1, screen;
+static int lines_orig = -1;
+
+static void readstdin(void);
 
 static Atom clip, utf8;
 static Display *dpy;
@@ -594,6 +597,10 @@ insert:
 		}
 		if (sel && !persist)
 			sel->out = 1;
+		if (persist) {
+			readstdin();
+			match();
+		}
 		break;
 	case XK_Right:
 	case XK_KP_Right:
@@ -698,6 +705,11 @@ buttonpress(XEvent *e)
 					sel->out = 1;
 					drawmenu();
 				}
+				if (persist) {
+					readstdin();
+					match();
+					drawmenu();
+				}
 				return;
 			}
 		}
@@ -727,6 +739,11 @@ buttonpress(XEvent *e)
 				sel = item;
 				if (sel && !persist) {
 					sel->out = 1;
+					drawmenu();
+				}
+				if (persist) {
+					readstdin();
+					match();
 					drawmenu();
 				}
 				return;
@@ -789,28 +806,51 @@ static void
 readstdin(void)
 {
 	char *line = NULL;
-	size_t i, itemsiz = 0, linesiz = 0;
+	size_t i = 0, itemsiz = 0, linesiz = 0;
 	ssize_t len;
+	struct item *new_items = NULL;
 
-	/* read each line from stdin and add it to the item list */
-	for (i = 0; (len = getline(&line, &linesiz, stdin)) != -1; i++) {
-		if (i + 1 >= itemsiz) {
-			itemsiz += 256;
-			if (!(items = realloc(items, itemsiz * sizeof(*items))))
-				die("cannot realloc %zu bytes:", itemsiz * sizeof(*items));
+	if (lines_orig == -1)
+		lines_orig = lines;
+
+	while (1) {
+		while ((len = getline(&line, &linesiz, stdin)) != -1) {
+			if (line[0] == '\1' && line[1] == '\n') goto success;
+			if (i + 1 >= itemsiz) {
+				itemsiz += 256;
+				if (!(new_items = realloc(new_items, itemsiz * sizeof(*new_items))))
+					die("cannot realloc %zu bytes:", itemsiz * sizeof(*new_items));
+			}
+			if (line[len - 1] == '\n')
+				line[len - 1] = '\0';
+			if (!(new_items[i].text = strdup(line)))
+				die("strdup:");
+			new_items[i].width = TEXTW(line);
+			new_items[i].out = 0;
+			i++;
 		}
-		if (line[len - 1] == '\n')
-			line[len - 1] = '\0';
-		if (!(items[i].text = strdup(line)))
-			die("strdup:");
-		items[i].width = TEXTW(line);
+		if (i > 0 || !persist) break;
+		clearerr(stdin);
+		usleep(10000);
+	}
 
-		items[i].out = 0;
+success:
+	if (i > 0 || len != -1) {
+		if (items) {
+			for (size_t j = 0; items[j].text; j++)
+				free(items[j].text);
+			free(items);
+		}
+		items = new_items;
+		if (items)
+			items[i].text = NULL;
+		lines = MIN(lines_orig, i);
+	} else if (new_items) {
+		for (size_t j = 0; j < i; j++)
+			free(new_items[j].text);
+		free(new_items);
 	}
 	free(line);
-	if (items)
-		items[i].text = NULL;
-	lines = MIN(lines, i);
 }
 
 static void
