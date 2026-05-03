@@ -50,6 +50,7 @@ static struct item *prev, *curr, *next, *sel;
 static int mon = -1, screen;
 static int lines_orig = -1;
 static int sel_index = -1;
+static char *sel_text = NULL;
 static int reload = 0;
 
 static void readstdin(void);
@@ -126,6 +127,7 @@ cleanup(void)
 	for (i = 0; items && items[i].text; ++i)
 		free(items[i].text);
 	free(items);
+	free(sel_text);
 	drw_free(drw);
 	XSync(dpy, False);
 	XCloseDisplay(dpy);
@@ -322,8 +324,6 @@ fuzzymatch(void)
 			appenditem(it, &matches, &matchend);
 		free(fuzzymatches);
 	}
-	curr = sel = matches;
-	calcoffsets();
 }
 
 static void
@@ -337,15 +337,19 @@ match(void)
 
 		char buf[sizeof text], *s;
 		int i, tokc = 0;
-		size_t len, textsize;
+		size_t textsize;
 		struct item *item, *lprefix, *lsubstr, *prefixend, *substrend;
 
 		strcpy(buf, text);
 		/* separate input text into tokens to be matched individually */
-		for (s = strtok(buf, " "); s; tokv[tokc - 1] = s, s = strtok(NULL, " "))
-			if (++tokc > tokn && !(tokv = realloc(tokv, ++tokn * sizeof *tokv)))
-				die("cannot realloc %zu bytes:", tokn * sizeof *tokv);
-		len = tokc ? strlen(tokv[0]) : 0;
+		for (s = strtok(buf, " "); s; s = strtok(NULL, " ")) {
+			if (tokc >= tokn) {
+				tokn += 8;
+				if (!(tokv = realloc(tokv, tokn * sizeof *tokv)))
+					die("cannot realloc %zu bytes:", tokn * sizeof *tokv);
+			}
+			tokv[tokc++] = s;
+		}
 
 		matches = lprefix = lsubstr = matchend = prefixend = substrend = NULL;
 		textsize = strlen(text) + 1;
@@ -358,7 +362,7 @@ match(void)
 			/* exact matches go first, then prefixes, then substrings */
 			if (!tokc || !fstrncmp(text, item->text, textsize))
 				appenditem(item, &matches, &matchend);
-			else if (!fstrncmp(tokv[0], item->text, len))
+			else if (!fstrncmp(tokv[0], item->text, strlen(tokv[0])))
 				appenditem(item, &lprefix, &prefixend);
 			else
 				appenditem(item, &lsubstr, &substrend);
@@ -379,11 +383,32 @@ match(void)
 				matches = lsubstr;
 			matchend = substrend;
 		}
-		curr = sel = matches;
 	}
+	curr = sel = matches;
 
 	if (reload) {
-		if (sel_index != -1) {
+		struct item *it;
+		int found = 0;
+		// 1. Try exact text match (Always best)
+		if (sel_text) {
+			for (it = matches; it; it = it->right) {
+				if (!strcmp(it->text, sel_text)) {
+					sel = it;
+					found = 1;
+					// Update view (curr) to show the found item
+					curr = matches;
+					int count = 0;
+					for (struct item *tmp = matches; tmp && tmp != sel; tmp = tmp->right) {
+						count++;
+						if (lines > 0 && count % lines == 0) curr = tmp->right;
+					}
+					break;
+				}
+			}
+		}
+		// 2. Fallback to index match ONLY IF search is empty
+		// (Prevents jumping to wrong items while filtering)
+		if (!found && sel_index != -1 && text[0] == '\0') {
 			for (int i = 0; i < sel_index && sel && sel->right; i++) {
 				sel = sel->right;
 				if (lines > 0 && i > 0 && (i + 1) % lines == 0)
@@ -614,13 +639,6 @@ insert:
 		if (sel && !persist)
 			sel->out = 1;
 		if (persist) {
-			sel_index = 0;
-			if (sel) {
-				for (struct item *it = matches; it && it != sel; it = it->right)
-					sel_index++;
-			} else {
-				sel_index = -1;
-			}
 			readstdin();
 			match();
 		}
@@ -729,13 +747,6 @@ buttonpress(XEvent *e)
 					drawmenu();
 				}
 				if (persist) {
-					sel_index = 0;
-					if (sel) {
-						for (struct item *it = matches; it && it != sel; it = it->right)
-							sel_index++;
-					} else {
-						sel_index = -1;
-					}
 					readstdin();
 					match();
 					drawmenu();
@@ -772,13 +783,6 @@ buttonpress(XEvent *e)
 					drawmenu();
 				}
 				if (persist) {
-					sel_index = 0;
-					if (sel) {
-						for (struct item *it = matches; it && it != sel; it = it->right)
-							sel_index++;
-					} else {
-						sel_index = -1;
-					}
 					readstdin();
 					match();
 					drawmenu();
@@ -849,8 +853,12 @@ readstdin(void)
 
 	reload = 1;
 	sel_index = 0;
+	free(sel_text);
+	sel_text = NULL;
+
 	if (sel) {
 		struct item *it;
+		sel_text = strdup(sel->text);
 		for (it = matches; it && it != sel; it = it->right)
 			sel_index++;
 		if (!it) sel_index = -1;
