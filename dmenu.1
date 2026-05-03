@@ -61,7 +61,13 @@ is faster, but will lock up X until stdin reaches end\-of\-file.
 dmenu matches menu items case insensitively.
 .TP
 .B \-persist
-dmenu does not exit when an item is selected with Return.
+dmenu does not exit when an item is selected with Return. It will re-read
+.B stdin
+after every selection to allow dynamic menu updates. A line containing only
+the character
+.B \\1
+(Control-A) signals the end of an update and triggers a redraw. The window
+will automatically resize to match the number of items.
 .TP
 .BI \-l " lines"
 dmenu lists items vertically, with the given number of lines.

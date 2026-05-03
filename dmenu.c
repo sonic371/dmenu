@@ -40,6 +40,7 @@ static char text[BUFSIZ] = "";
 static char *embed;
 static int persist = 0;
 static int bh, mw, mh;
+static int win_x, win_y;
 static int inputw = 0, promptw;
 static int lrpad; /* sum of left and right padding */
 static size_t cursor;
@@ -52,6 +53,7 @@ static int sel_index = -1;
 static int reload = 0;
 
 static void readstdin(void);
+static void recalculategeometry(void);
 
 static Atom clip, utf8;
 static Display *dpy;
@@ -892,6 +894,11 @@ success:
 		if (items)
 			items[i].text = NULL;
 		lines = MIN(lines_orig, i);
+		if (win) {
+			recalculategeometry();
+			XMoveResizeWindow(dpy, win, win_x, win_y, mw, mh);
+			drw_resize(drw, mw, mh);
+		}
 	} else if (new_items) {
 		for (size_t j = 0; j < i; j++)
 			free(new_items[j].text);
@@ -945,33 +952,25 @@ run(void)
 }
 
 static void
-setup(void)
+recalculategeometry(void)
 {
-	int x, y, i, j;
+	int i, j, di;
 	unsigned int du;
-	XSetWindowAttributes swa;
-	XIM xim;
 	Window w, dw, *dws;
 	XWindowAttributes wa;
-	XClassHint ch = {"dmenu", "dmenu"};
 #ifdef XINERAMA
 	XineramaScreenInfo *info;
 	Window pw;
-	int a, di, n, area = 0;
+	int a, n, area = 0;
 #endif
-	/* init appearance */
-	for (j = 0; j < SchemeLast; j++)
-		scheme[j] = drw_scm_create(drw, colors[j], 2);
-
-	clip = XInternAtom(dpy, "CLIPBOARD",   False);
-	utf8 = XInternAtom(dpy, "UTF8_STRING", False);
 
 	/* calculate menu geometry */
 	bh = drw->fonts->h + 2;
-	bh = MAX(bh,lineheight);	/* make a menu line AT LEAST 'lineheight' tall */
+	bh = MAX(bh, lineheight);
 	lines = MAX(lines, 0);
 	mh = (lines + 1) * bh;
 	promptw = (prompt && *prompt) ? TEXTW(prompt) - lrpad / 4 : 0;
+
 #ifdef XINERAMA
 	i = 0;
 	if (parentwin == root && (info = XineramaQueryScreens(dpy, &n))) {
@@ -979,12 +978,10 @@ setup(void)
 		if (mon >= 0 && mon < n)
 			i = mon;
 		else if (w != root && w != PointerRoot && w != None) {
-			/* find top-level window containing current input focus */
 			do {
 				if (XQueryTree(dpy, (pw = w), &dw, &w, &dws, &du) && dws)
 					XFree(dws);
 			} while (w != root && w != pw);
-			/* find xinerama screen with which the window intersects most */
 			if (XGetWindowAttributes(dpy, pw, &wa))
 				for (j = 0; j < n; j++)
 					if ((a = INTERSECT(wa.x, wa.y, wa.width, wa.height, info[j])) > area) {
@@ -992,42 +989,58 @@ setup(void)
 						i = j;
 					}
 		}
-		/* no focused window is on screen, so use pointer location instead */
-		if (mon < 0 && !area && XQueryPointer(dpy, root, &dw, &dw, &x, &y, &di, &di, &du))
+		if (mon < 0 && !area && XQueryPointer(dpy, root, &dw, &dw, &win_x, &win_y, &di, &di, &du))
 			for (i = 0; i < n; i++)
-				if (INTERSECT(x, y, 1, 1, info[i]) != 0)
+				if (INTERSECT(win_x, win_y, 1, 1, info[i]) != 0)
 					break;
 
 		if (centered) {
 			mw = MIN(MAX(max_textw() + promptw, min_width), info[i].width);
-			x = info[i].x_org + ((info[i].width  - mw) / 2);
-			y = info[i].y_org + ((info[i].height - mh) / menu_height_ratio);
+			win_x = info[i].x_org + ((info[i].width  - mw) / 2);
+			win_y = info[i].y_org + ((info[i].height - mh) / menu_height_ratio);
 		} else {
-			x = info[i].x_org;
-			y = info[i].y_org + (topbar ? 0 : info[i].height - mh);
+			win_x = info[i].x_org;
+			win_y = info[i].y_org + (topbar ? 0 : info[i].height - mh);
 			mw = info[i].width;
 		}
-
 		XFree(info);
 	} else
 #endif
 	{
 		if (!XGetWindowAttributes(dpy, parentwin, &wa))
-			die("could not get embedding window attributes: 0x%lx",
-			    parentwin);
+			die("could not get embedding window attributes: 0x%lx", parentwin);
 
 		if (centered) {
 			mw = MIN(MAX(max_textw() + promptw, min_width), wa.width);
-			x = (wa.width  - mw) / 2;
-			y = (wa.height - mh) / 2;
+			win_x = (wa.width  - mw) / 2;
+			win_y = (wa.height - mh) / 2;
 		} else {
-			x = 0;
-			y = topbar ? 0 : wa.height - mh;
+			win_x = 0;
+			win_y = topbar ? 0 : wa.height - mh;
 			mw = wa.width;
 		}
 	}
-	promptw = (prompt && *prompt) ? TEXTW(prompt) - lrpad / 4 : 0;
-	inputw = mw / 3; /* input width: ~33% of monitor width */
+	inputw = mw / 3;
+}
+
+static void
+setup(void)
+{
+	int i, j;
+	unsigned int du;
+	XSetWindowAttributes swa;
+	XIM xim;
+	Window w, dw, *dws;
+	XClassHint ch = {"dmenu", "dmenu"};
+
+	/* init appearance */
+	for (j = 0; j < SchemeLast; j++)
+		scheme[j] = drw_scm_create(drw, colors[j], 2);
+
+	clip = XInternAtom(dpy, "CLIPBOARD",   False);
+	utf8 = XInternAtom(dpy, "UTF8_STRING", False);
+
+	recalculategeometry();
 	match();
 
 	/* create menu window */
@@ -1036,7 +1049,7 @@ setup(void)
 	swa.event_mask = ExposureMask | KeyPressMask | VisibilityChangeMask |
 	                 ButtonPressMask | PointerMotionMask;
 
-	win = XCreateWindow(dpy, root, x, y, mw, mh, 0,
+	win = XCreateWindow(dpy, root, win_x, win_y, mw, mh, 0,
 	                    CopyFromParent, CopyFromParent, CopyFromParent,
 	                    CWOverrideRedirect | CWBackPixel | CWEventMask, &swa);
 	XSetClassHint(dpy, win, &ch);
@@ -1050,8 +1063,7 @@ setup(void)
 
 	XMapRaised(dpy, win);
 	if (embed) {
-		XReparentWindow(dpy, win, parentwin, x, y);
-		XSelectInput(dpy, parentwin, FocusChangeMask | SubstructureNotifyMask);
+		XReparentWindow(dpy, win, parentwin, win_x, win_y);
 		if (XQueryTree(dpy, parentwin, &dw, &w, &dws, &du) && dws) {
 			for (i = 0; i < du && dws[i] != win; ++i)
 				XSelectInput(dpy, dws[i], FocusChangeMask);
