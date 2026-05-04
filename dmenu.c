@@ -25,6 +25,7 @@
 #define INTERSECT(x,y,w,h,r)  (MAX(0, MIN((x)+(w),(r).x_org+(r).width)  - MAX((x),(r).x_org)) \
                              * MAX(0, MIN((y)+(h),(r).y_org+(r).height) - MAX((y),(r).y_org)))
 #define TEXTW(X)              (drw_fontset_getwidth(drw, (X)) + lrpad)
+#define IS_SEP(s)             (s && !strncmp(s, "━", 3))
 
 /* enums */
 enum { SchemeNorm, SchemeSel, SchemeOut, SchemeLast }; /* color schemes */
@@ -376,8 +377,8 @@ match(void)
 				matches = lsubstr;
 			matchend = substrend;
 		}
-		curr = sel = matches;
 	}
+	curr = sel = matches;
 
 	if (reload) {
 		struct item *it;
@@ -400,7 +401,6 @@ match(void)
 			}
 		}
 		// 2. Fallback to index match ONLY IF search is empty
-		// (Prevents jumping to wrong items while filtering)
 		if (!found && sel_index != -1 && text[0] == '\0') {
 			for (int i = 0; i < sel_index && sel && sel->right; i++) {
 				sel = sel->right;
@@ -606,7 +606,7 @@ insert:
 			curr = prev;
 			calcoffsets();
 		}
-		while (sel && sel->left && !strncmp(sel->text, "━", 3)) {
+		while (sel && sel->left && IS_SEP(sel->text)) {
 			if ((sel = sel->left)->right == curr) {
 				curr = prev;
 				calcoffsets();
@@ -653,7 +653,7 @@ insert:
 			curr = next;
 			calcoffsets();
 		}
-		while (sel && sel->right && !strncmp(sel->text, "━", 3)) {
+		while (sel && sel->right && IS_SEP(sel->text)) {
 			if ((sel = sel->right) == next) {
 				curr = next;
 				calcoffsets();
@@ -736,7 +736,7 @@ buttonpress(XEvent *e)
 		for (item = curr; item != next; item = item->right) {
 			y += h;
 			if (ev->y >= y && ev->y <= (y + h)) {
-				if (!strncmp(item->text, "━", 3)) return;
+				if (IS_SEP(item->text)) return;
 				puts(item->text);
 				fflush(stdout);
 				if (!(ev->state & ControlMask) && !persist) {
@@ -768,7 +768,7 @@ buttonpress(XEvent *e)
 			x += w;
 			w = MIN(TEXTW(item->text), mw - x - TEXTW(">"));
 			if (ev->x >= x && ev->x <= x + w) {
-				if (!strncmp(item->text, "━", 3)) return;
+				if (IS_SEP(item->text)) return;
 				puts(item->text);
 				fflush(stdout);
 				if (!(ev->state & ControlMask) && !persist) {
@@ -809,7 +809,7 @@ motionevent(XButtonEvent *ev)
 	for (it = curr; it && it != next; it = it->right) {
 		int wh = lines > 0 ? bh : textw_clamp(it->text, mw - xy - TEXTW(">"));
 		if (ev_xy >= xy && ev_xy < (xy + wh)) {
-			if (!strncmp(it->text, "━", 3)) break; // Skip separators
+			if (IS_SEP(it->text)) break; // Skip separators
 			sel = it;
 			calcoffsets();
 			drawmenu();
@@ -913,6 +913,48 @@ run(void)
 	fd_set fds;
 	struct timeval tv;
 
+	if (!persist) {
+		/* Original stable dmenu loop */
+		while (XNextEvent(dpy, &ev) == 0) {
+			if (XFilterEvent(&ev, win))
+				continue;
+			switch (ev.type) {
+			case DestroyNotify:
+				if (ev.xdestroywindow.window != win)
+					break;
+				cleanup();
+				exit(1);
+			case ButtonPress:
+				buttonpress(&ev);
+				break;
+			case MotionNotify:
+				motionevent(&ev.xbutton);
+				break;
+			case Expose:
+				if (ev.xexpose.count == 0)
+					drw_map(drw, win, 0, 0, mw, mh);
+				break;
+			case FocusIn:
+				if (ev.xfocus.window != win)
+					grabfocus();
+				break;
+			case KeyPress:
+				keypress(&ev.xkey);
+				break;
+			case SelectionNotify:
+				if (ev.xselection.property == utf8)
+					paste();
+				break;
+			case VisibilityNotify:
+				if (ev.xvisibility.state != VisibilityUnobscured)
+					XRaiseWindow(dpy, win);
+				break;
+			}
+		}
+		return;
+	}
+
+	/* Persistent dynamic HUD loop */
 	while (1) {
 		while (XPending(dpy)) {
 			XNextEvent(dpy, &ev);
@@ -935,7 +977,6 @@ run(void)
 					drw_map(drw, win, 0, 0, mw, mh);
 				break;
 			case FocusIn:
-				/* regrab focus from parent window */
 				if (ev.xfocus.window != win)
 					grabfocus();
 				break;
@@ -957,7 +998,7 @@ run(void)
 		FD_SET(xfd, &fds);
 		FD_SET(STDIN_FILENO, &fds);
 		tv.tv_sec = 0;
-		tv.tv_usec = 50000; // 50ms for high responsiveness
+		tv.tv_usec = 50000;
 
 		if (select((xfd > STDIN_FILENO ? xfd : STDIN_FILENO) + 1, &fds, NULL, NULL, &tv) > 0) {
 			if (FD_ISSET(STDIN_FILENO, &fds)) {
@@ -1103,6 +1144,7 @@ setup(void)
 	XMapRaised(dpy, win);
 	if (embed) {
 		XReparentWindow(dpy, win, parentwin, win_x, win_y);
+		XSelectInput(dpy, parentwin, FocusChangeMask | SubstructureNotifyMask);
 		if (XQueryTree(dpy, parentwin, &dw, &w, &dws, &du) && dws) {
 			for (i = 0; i < du && dws[i] != win; ++i)
 				XSelectInput(dpy, dws[i], FocusChangeMask);
