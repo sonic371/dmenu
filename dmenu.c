@@ -56,6 +56,7 @@ static char *sel_text = NULL;
 static int reload = 0;
 
 static void readstdin(void);
+static void restoreselection(void);
 static void recalculategeometry(void);
 static int max_textw(void);
 
@@ -321,6 +322,43 @@ fuzzymatch(void)
 }
 
 static void
+restoreselection(void)
+{
+	if (!reload)
+		return;
+
+	struct item *it;
+	int found = 0;
+
+	if (sel_text) {
+		for (it = matches; it; it = it->right) {
+			if (!strcmp(it->text, sel_text)) {
+				sel = it;
+				found = 1;
+				/* scroll view to show the found item */
+				curr = matches;
+				int count = 0;
+				for (struct item *tmp = matches; tmp && tmp != sel; tmp = tmp->right) {
+					count++;
+					if (lines > 0 && count % lines == 0)
+						curr = tmp->right;
+				}
+				break;
+			}
+		}
+	}
+	/* fallback to index match only when search is empty */
+	if (!found && sel_index != -1 && text[0] == '\0') {
+		for (int i = 0; i < sel_index && sel && sel->right; i++) {
+			sel = sel->right;
+			if (lines > 0 && i > 0 && (i + 1) % lines == 0)
+				curr = sel;
+		}
+	}
+	reload = 0;
+}
+
+static void
 match(void)
 {
 	if (fuzzy)
@@ -380,36 +418,7 @@ match(void)
 	}
 	curr = sel = matches;
 
-	if (reload) {
-		struct item *it;
-		int found = 0;
-		// 1. Try exact text match (Always best)
-		if (sel_text) {
-			for (it = matches; it; it = it->right) {
-				if (!strcmp(it->text, sel_text)) {
-					sel = it;
-					found = 1;
-					// Update view (curr) to show the found item
-					curr = matches;
-					int count = 0;
-					for (struct item *tmp = matches; tmp && tmp != sel; tmp = tmp->right) {
-						count++;
-						if (lines > 0 && count % lines == 0) curr = tmp->right;
-					}
-					break;
-				}
-			}
-		}
-		// 2. Fallback to index match ONLY IF search is empty
-		if (!found && sel_index != -1 && text[0] == '\0') {
-			for (int i = 0; i < sel_index && sel && sel->right; i++) {
-				sel = sel->right;
-				if (lines > 0 && i > 0 && (i + 1) % lines == 0)
-					curr = sel;
-			}
-		}
-		reload = 0;
-	}
+	restoreselection();
 
 	calcoffsets();
 }
@@ -809,14 +818,18 @@ motionevent(XButtonEvent *ev)
 	for (it = curr; it && it != next; it = it->right) {
 		int wh = lines > 0 ? bh : textw_clamp(it->text, mw - xy - TEXTW(">"));
 		if (ev_xy >= xy && ev_xy < (xy + wh)) {
-			if (IS_SEP(it->text)) break; // Skip separators
-			sel = it;
-			calcoffsets();
-			drawmenu();
-			break;
+			if (IS_SEP(it->text))
+				break; /* skip separators */
+			if (it != sel) {
+				sel = it;
+				calcoffsets();
+				drawmenu();
+			}
+			return; /* item under pointer found */
 		}
 		xy += wh;
 	}
+	/* pointer is not over any item — no change to selection */
 }
 
 static void
@@ -853,6 +866,8 @@ readstdin(void)
 	if (sel) {
 		struct item *it;
 		sel_text = strdup(sel->text);
+		if (!sel_text)
+			die("strdup:");
 		for (it = matches; it && it != sel; it = it->right)
 			sel_index++;
 		if (!it) sel_index = -1;
@@ -881,7 +896,14 @@ readstdin(void)
 		}
 		if (feof(stdin) || !persist) break;
 		clearerr(stdin);
-		usleep(20000);
+		/* wait for more data from stdin using select() instead of busy-looping */
+		{
+			fd_set fds;
+			struct timeval tv = { .tv_sec = 0, .tv_usec = 50000 };
+			FD_ZERO(&fds);
+			FD_SET(STDIN_FILENO, &fds);
+			select(STDIN_FILENO + 1, &fds, NULL, NULL, &tv);
+		}
 	}
 
 success:
