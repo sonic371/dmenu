@@ -16,6 +16,7 @@
 #include <X11/extensions/Xinerama.h>
 #endif
 #include <X11/Xft/Xft.h>
+#include <sys/select.h>
 
 #include "drw.h"
 #include "util.h"
@@ -55,6 +56,7 @@ static int reload = 0;
 
 static void readstdin(void);
 static void recalculategeometry(void);
+static int max_textw(void);
 
 static Atom clip, utf8;
 static Display *dpy;
@@ -105,15 +107,6 @@ calcoffsets(void)
 	for (i = 0, prev = curr; prev && prev->left; prev = prev->left)
 		if ((i += (lines > 0) ? bh : textw_clamp(prev->left->text, n)) > n)
 			break;
-}
-
-static int
-max_textw(void)
-{
-	int len = 0;
-	for (struct item *item = items; item && item->text; item++)
-		len = MAX(item->width, len);
-	return len;
 }
 
 static void
@@ -169,7 +162,7 @@ drawmenu(void)
 {
 	unsigned int curpos;
 	struct item *item;
-	int x = 0, y = 0, fh = drw->fonts->h, w;
+	int x = 0, y = 0, w;
 
 	drw_setscheme(drw, scheme[SchemeNorm]);
 	drw_rect(drw, 0, 0, mw, mh, 1, 1);
@@ -183,18 +176,18 @@ drawmenu(void)
 	drw_setscheme(drw, scheme[SchemeNorm]);
 	drw_text(drw, x, 0, w, bh, lrpad / 2, text, 0);
 
-	curpos = TEXTW(text) - TEXTW(&text[cursor]);
+	curpos = TEXTW(text) - lrpad;
 	if ((curpos += lrpad / 2 - 1) < w) {
 		drw_setscheme(drw, scheme[SchemeNorm]);
-		drw_rect(drw, x + curpos, 2 + (bh - fh) / 2, 2, fh - 4, 1, 0);
+		drw_rect(drw, x + curpos, 2, 2, bh - 4, 1, 0);
 	}
 
 	if (lines > 0) {
-		/* draw vertical list */
+		/* vertical list: draw items horizontally */
 		for (item = curr; item != next; item = item->right)
 			drawitem(item, x, y += bh, mw - x);
 	} else if (matches) {
-		/* draw horizontal list */
+		/* horizontal list: draw items vertically */
 		x += inputw;
 		w = TEXTW("<");
 		if (curr->left) {
@@ -383,8 +376,8 @@ match(void)
 				matches = lsubstr;
 			matchend = substrend;
 		}
+		curr = sel = matches;
 	}
-	curr = sel = matches;
 
 	if (reload) {
 		struct item *it;
@@ -613,6 +606,12 @@ insert:
 			curr = prev;
 			calcoffsets();
 		}
+		while (sel && sel->left && !strncmp(sel->text, "━", 3)) {
+			if ((sel = sel->left)->right == curr) {
+				curr = prev;
+				calcoffsets();
+			}
+		}
 		break;
 	case XK_Next:
 	case XK_KP_Next:
@@ -638,10 +637,6 @@ insert:
 		}
 		if (sel && !persist)
 			sel->out = 1;
-		if (persist) {
-			readstdin();
-			match();
-		}
 		break;
 	case XK_Right:
 	case XK_KP_Right:
@@ -657,6 +652,12 @@ insert:
 		if (sel && sel->right && (sel = sel->right) == next) {
 			curr = next;
 			calcoffsets();
+		}
+		while (sel && sel->right && !strncmp(sel->text, "━", 3)) {
+			if ((sel = sel->right) == next) {
+				curr = next;
+				calcoffsets();
+			}
 		}
 		break;
 	case XK_Tab:
@@ -735,6 +736,7 @@ buttonpress(XEvent *e)
 		for (item = curr; item != next; item = item->right) {
 			y += h;
 			if (ev->y >= y && ev->y <= (y + h)) {
+				if (!strncmp(item->text, "━", 3)) return;
 				puts(item->text);
 				fflush(stdout);
 				if (!(ev->state & ControlMask) && !persist) {
@@ -744,11 +746,6 @@ buttonpress(XEvent *e)
 				sel = item;
 				if (sel && !persist) {
 					sel->out = 1;
-					drawmenu();
-				}
-				if (persist) {
-					readstdin();
-					match();
 					drawmenu();
 				}
 				return;
@@ -771,6 +768,7 @@ buttonpress(XEvent *e)
 			x += w;
 			w = MIN(TEXTW(item->text), mw - x - TEXTW(">"));
 			if (ev->x >= x && ev->x <= x + w) {
+				if (!strncmp(item->text, "━", 3)) return;
 				puts(item->text);
 				fflush(stdout);
 				if (!(ev->state & ControlMask) && !persist) {
@@ -780,11 +778,6 @@ buttonpress(XEvent *e)
 				sel = item;
 				if (sel && !persist) {
 					sel->out = 1;
-					drawmenu();
-				}
-				if (persist) {
-					readstdin();
-					match();
 					drawmenu();
 				}
 				return;
@@ -816,6 +809,7 @@ motionevent(XButtonEvent *ev)
 	for (it = curr; it && it != next; it = it->right) {
 		int wh = lines > 0 ? bh : textw_clamp(it->text, mw - xy - TEXTW(">"));
 		if (ev_xy >= xy && ev_xy < (xy + wh)) {
+			if (!strncmp(it->text, "━", 3)) break; // Skip separators
 			sel = it;
 			calcoffsets();
 			drawmenu();
@@ -885,13 +879,13 @@ readstdin(void)
 			new_items[i].out = 0;
 			i++;
 		}
-		if (i > 0 || !persist || feof(stdin)) break;
+		if (feof(stdin) || !persist) break;
 		clearerr(stdin);
-		usleep(10000);
+		usleep(20000);
 	}
 
 success:
-	if (i > 0 || (len != -1 && !feof(stdin))) {
+	if (new_items) {
 		if (items) {
 			for (size_t j = 0; items[j].text; j++)
 				free(items[j].text);
@@ -907,10 +901,6 @@ success:
 			XMoveResizeWindow(dpy, win, win_x, win_y, mw, mh);
 			drw_resize(drw, mw, mh);
 		}
-	} else if (new_items) {
-		for (size_t j = 0; j < i; j++)
-			free(new_items[j].text);
-		free(new_items);
 	}
 	free(line);
 }
@@ -919,44 +909,85 @@ static void
 run(void)
 {
 	XEvent ev;
+	int xfd = ConnectionNumber(dpy);
+	fd_set fds;
+	struct timeval tv;
 
-	while (!XNextEvent(dpy, &ev)) {
-		if (XFilterEvent(&ev, win))
-			continue;
-		switch(ev.type) {
-		case DestroyNotify:
-			if (ev.xdestroywindow.window != win)
+	while (1) {
+		while (XPending(dpy)) {
+			XNextEvent(dpy, &ev);
+			if (XFilterEvent(&ev, win))
+				continue;
+			switch (ev.type) {
+			case DestroyNotify:
+				if (ev.xdestroywindow.window != win)
+					break;
+				cleanup();
+				exit(1);
+			case ButtonPress:
+				buttonpress(&ev);
 				break;
-			cleanup();
-			exit(1);
-		case ButtonPress:
-			buttonpress(&ev);
-			break;
-		case MotionNotify:
-			motionevent(&ev.xbutton);
-			break;
-		case Expose:
-			if (ev.xexpose.count == 0)
-				drw_map(drw, win, 0, 0, mw, mh);
-			break;
-		case FocusIn:
-			/* regrab focus from parent window */
-			if (ev.xfocus.window != win)
-				grabfocus();
-			break;
-		case KeyPress:
-			keypress(&ev.xkey);
-			break;
-		case SelectionNotify:
-			if (ev.xselection.property == utf8)
-				paste();
-			break;
-		case VisibilityNotify:
-			if (ev.xvisibility.state != VisibilityUnobscured)
-				XRaiseWindow(dpy, win);
-			break;
+			case MotionNotify:
+				motionevent(&ev.xbutton);
+				break;
+			case Expose:
+				if (ev.xexpose.count == 0)
+					drw_map(drw, win, 0, 0, mw, mh);
+				break;
+			case FocusIn:
+				/* regrab focus from parent window */
+				if (ev.xfocus.window != win)
+					grabfocus();
+				break;
+			case KeyPress:
+				keypress(&ev.xkey);
+				break;
+			case SelectionNotify:
+				if (ev.xselection.property == utf8)
+					paste();
+				break;
+			case VisibilityNotify:
+				if (ev.xvisibility.state != VisibilityUnobscured)
+					XRaiseWindow(dpy, win);
+				break;
+			}
+		}
+
+		FD_ZERO(&fds);
+		FD_SET(xfd, &fds);
+		FD_SET(STDIN_FILENO, &fds);
+		tv.tv_sec = 0;
+		tv.tv_usec = 50000; // 50ms for high responsiveness
+
+		if (select((xfd > STDIN_FILENO ? xfd : STDIN_FILENO) + 1, &fds, NULL, NULL, &tv) > 0) {
+			if (FD_ISSET(STDIN_FILENO, &fds)) {
+				readstdin();
+				match();
+				
+				/* Sync highlight with mouse position after reload */
+				Window dw;
+				int px, py, di;
+				unsigned int du;
+				XButtonEvent bev;
+				if (XQueryPointer(dpy, win, &dw, &dw, &di, &di, &px, &py, &du)) {
+					bev.window = win;
+					bev.x = px;
+					bev.y = py;
+					motionevent(&bev);
+				}
+				drawmenu();
+			}
 		}
 	}
+}
+
+static int
+max_textw(void)
+{
+	int len = 0;
+	for (size_t i = 0; items && items[i].text; i++)
+		len = MAX(items[i].width, len);
+	return len;
 }
 
 static void
