@@ -2,6 +2,7 @@
 #include <ctype.h>
 #include <locale.h>
 #include <math.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -198,7 +199,7 @@ drawmenu(void)
 		/* vertical list: draw items horizontally */
 		for (item = curr; item != next; item = item->right)
 			drawitem(item, x, y += bh, mw - x);
-	} else if (matches) {
+	} else if (matches && curr) {
 		/* horizontal list: draw items vertically */
 		x += inputw;
 		w = TEXTW("<");
@@ -567,7 +568,7 @@ keypress(XKeyEvent *ev)
 	switch(ksym) {
 	default:
 insert:
-		if (!iscntrl((unsigned char)*buf))
+		if (len > 0 && !iscntrl((unsigned char)*buf))
 			insert(buf, len);
 		break;
 	case XK_Delete:
@@ -893,10 +894,12 @@ readstdin(void)
 			if (line[0] == '\1' && line[1] == '\n') goto success;
 			if (i + 1 >= itemsiz) {
 				itemsiz += 256;
+				if (itemsiz > SIZE_MAX / sizeof(*new_items))
+					die("too many items");
 				if (!(new_items = realloc(new_items, itemsiz * sizeof(*new_items))))
 					die("cannot realloc %zu bytes:", itemsiz * sizeof(*new_items));
 			}
-			if (line[len - 1] == '\n')
+			if (len > 0 && line[len - 1] == '\n')
 				line[len - 1] = '\0';
 			if (!(new_items[i].text = strdup(line)))
 				die("strdup:");
@@ -1086,6 +1089,8 @@ recalculategeometry(void)
 #ifdef XINERAMA
 	i = 0;
 	if (parentwin == root && (info = XineramaQueryScreens(dpy, &n))) {
+		if (n < 1)
+			die("Xinerama reported no screens");
 		XGetInputFocus(dpy, &w, &di);
 		if (mon >= 0 && mon < n)
 			i = mon;
@@ -1105,6 +1110,9 @@ recalculategeometry(void)
 			for (i = 0; i < n; i++)
 				if (INTERSECT(win_x, win_y, 1, 1, info[i]) != 0)
 					break;
+		/* fallback to the first screen if there is no intersection */
+		if (i >= n)
+			i = 0;
 
 		if (centered) {
 			mw = MIN(MAX(max_textw() + promptw, min_width), info[i].width);
@@ -1171,8 +1179,9 @@ setup(void)
 	if ((xim = XOpenIM(dpy, NULL, NULL, NULL)) == NULL)
 		die("XOpenIM failed: could not open input device");
 
-	xic = XCreateIC(xim, XNInputStyle, XIMPreeditNothing | XIMStatusNothing,
-	                XNClientWindow, win, XNFocusWindow, win, NULL);
+	if ((xic = XCreateIC(xim, XNInputStyle, XIMPreeditNothing | XIMStatusNothing,
+	                XNClientWindow, win, XNFocusWindow, win, NULL)) == NULL)
+		die("XCreateIC failed: could not obtain input context");
 
 	XMapRaised(dpy, win);
 	if (embed) {
